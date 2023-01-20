@@ -1,0 +1,8 @@
+accelerate
+torch
+torchvision
+git+https://github.com/huggingface/transformers
+ftfy
+tensorboard
+modelcards
+bitsandbytes
