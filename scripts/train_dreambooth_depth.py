@@ -17,7 +17,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DiffusionPipeline
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
@@ -677,7 +677,6 @@ def main(args):
         collate_fn=collater,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
-        persistant_workers=args.persistant_workers,
         prefetch_factor=args.prefetch_factor,
         drop_last=args.drop_incomplete_batches,
     )
@@ -860,11 +859,14 @@ def main(args):
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
-        pipeline = StableDiffusionPipeline.from_pretrained(
+        # Copy the depth estimator from the pretrained pipeline, so it's self contained
+        original_pipeline = DiffusionPipeline.from_pretrained(args.pretrained_model_name_or_path)
+        pipeline = DiffusionPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             unet=accelerator.unwrap_model(unet),
             text_encoder=accelerator.unwrap_model(text_encoder),
             revision=args.revision,
+            depth_estimator=original_pipeline.depth_estimator,
         )
         pipeline.save_pretrained(args.output_dir)
 
