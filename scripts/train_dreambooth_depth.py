@@ -17,7 +17,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DiffusionPipeline
+from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DiffusionPipeline
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
@@ -318,8 +318,15 @@ class DreamBoothDepthDataset(Dataset):
         self.vae_scale_factor = vae_scale_factor
 
         self.instance_data_root = Path(instance_data_root)
+        # The dictionary that holds the instance prompt. The priority would be command line prompt > this dict > file name
+        self.instance_prompt_dict = None
         if not self.instance_data_root.exists():
             raise ValueError("Instance images root doesn't exists.")
+        tag_file = self.instance_data_root / 'tags.tsv'
+        if tag_file.exists():
+            # Read instances from the tags file
+            lines = [x.strip().split('\t') for x in tag_file.open()]
+            self.instance_prompt_dict = {x[0]: x[1] for x in lines}
 
         self.instance_images_path = list(filter(lambda path: str(path).find("_depth.") == -1, self.instance_data_root.iterdir()))
         self.num_instance_images = len(self.instance_images_path)
@@ -362,8 +369,11 @@ class DreamBoothDepthDataset(Dataset):
         instance_image_path = self.instance_images_path[index % self.num_instance_images]
         if self.instance_prompt in ["", None]:
             # if not using a static prompt use the image name as prompt
-            instance_prompt = re.sub(r'\..*$', '', instance_image_path.name)
-            instance_prompt = re.sub(r'_\d+', '', instance_prompt) # remove the number at the end of the image name for duplicate images
+            if self.instance_prompt_dict is None:
+                instance_prompt = re.sub(r'\..*$', '', instance_image_path.name)
+                instance_prompt = re.sub(r'_\d+', '', instance_prompt) # remove the number at the end of the image name for duplicate images
+            else:
+                instance_prompt = self.instance_prompt_dict[os.path.basename(instance_image_path.name)]
             if random.random() < self.instance_prompt_shuffle_prob:
                 # shuffle the prompt after splitting by the separator token if the probability condition is met
                 instance_prompt = self.instance_prompt_sep_token.join(random.sample(instance_prompt.split(self.instance_prompt_sep_token), len(instance_prompt.split(self.instance_prompt_sep_token))))
@@ -653,7 +663,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = PNDMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     vae_scale_factor = create_depth_images([args.instance_data_dir, args.class_data_dir], args.pretrained_model_name_or_path, accelerator, unet, text_encoder)
     train_dataset = DreamBoothDepthDataset(
