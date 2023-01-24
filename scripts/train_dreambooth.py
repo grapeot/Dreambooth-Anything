@@ -5,6 +5,7 @@ import random
 import json
 import math
 import os
+import re
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
@@ -252,6 +253,15 @@ def parse_args(input_args=None):
         default=None,
         help="Path to json containing multiple concepts, will overwrite parameters like instance_prompt, class_prompt, etc.",
     )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -495,20 +505,79 @@ def main(args):
             subfolder="tokenizer",
             revision=args.revision,
         )
+    
+    train_dataset = DreamBoothDataset(
+        concepts_list=args.concepts_list,
+        tokenizer=tokenizer,
+        with_prior_preservation=args.with_prior_preservation,
+        size=args.resolution,
+        center_crop=args.center_crop,
+        num_class_images=args.num_class_images,
+        pad_tokens=args.pad_tokens,
+        hflip=args.hflip
+    )
+
+    def collate_fn(examples):
+        input_ids = [example["instance_prompt_ids"] for example in examples]
+        pixel_values = [example["instance_images"] for example in examples]
+
+        # Concat class and instance examples for prior preservation.
+        # We do this to avoid doing two forward passes.
+        if args.with_prior_preservation:
+            input_ids += [example["class_prompt_ids"] for example in examples]
+            pixel_values += [example["class_images"] for example in examples]
+
+        pixel_values = torch.stack(pixel_values)
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+        input_ids = tokenizer.pad(
+            {"input_ids": input_ids},
+            padding=True,
+            return_tensors="pt",
+        ).input_ids
+
+        batch = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+        }
+        return batch
+
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True
+    )
 
     # Load models and create wrapper for stable diffusion
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            model_path = args.resume_from_checkpoint
+        else:
+            # Get the most recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if re.search('^[0-9]*$', d) is not None]
+            dirs = sorted(dirs, key=lambda x: int(x))
+            model_path = os.path.join(args.output_dir, dirs[-1])
+        accelerator.print(f"Resuming from checkpoint {model_path}")
+        global_step = int(os.path.basename(model_path)) + 1
+        first_epoch = global_step // len(train_dataloader)
+        resume_step = global_step % len(train_dataloader)
+    else:
+        model_path = args.pretrained_model_name_or_path
+        global_step = 0
+        first_epoch = 0
+        resume_step = 0
+
     text_encoder = CLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path,
+        model_path,
         subfolder="text_encoder",
         revision=args.revision,
     )
     vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
+        model_path,
         subfolder="vae",
         revision=args.revision,
     )
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path,
+        model_path,
         subfolder="unet",
         revision=args.revision,
         torch_dtype=torch.float32
@@ -553,46 +622,6 @@ def main(args):
     )
 
     noise_scheduler = DDPMScheduler.from_config(args.pretrained_model_name_or_path, subfolder="scheduler")
-
-    train_dataset = DreamBoothDataset(
-        concepts_list=args.concepts_list,
-        tokenizer=tokenizer,
-        with_prior_preservation=args.with_prior_preservation,
-        size=args.resolution,
-        center_crop=args.center_crop,
-        num_class_images=args.num_class_images,
-        pad_tokens=args.pad_tokens,
-        hflip=args.hflip
-    )
-
-    def collate_fn(examples):
-        input_ids = [example["instance_prompt_ids"] for example in examples]
-        pixel_values = [example["instance_images"] for example in examples]
-
-        # Concat class and instance examples for prior preservation.
-        # We do this to avoid doing two forward passes.
-        if args.with_prior_preservation:
-            input_ids += [example["class_prompt_ids"] for example in examples]
-            pixel_values += [example["class_images"] for example in examples]
-
-        pixel_values = torch.stack(pixel_values)
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-        input_ids = tokenizer.pad(
-            {"input_ids": input_ids},
-            padding=True,
-            return_tensors="pt",
-        ).input_ids
-
-        batch = {
-            "input_ids": input_ids,
-            "pixel_values": pixel_values,
-        }
-        return batch
-
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True
-    )
 
     weight_dtype = torch.float32
     if args.mixed_precision == "fp16":
@@ -724,16 +753,21 @@ def main(args):
             print(f"[*] Weights saved at {save_dir}")
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(args.max_train_steps), 
+        disable=not accelerator.is_local_main_process)
+    progress_bar.update(global_step)
     progress_bar.set_description("Steps")
-    global_step = 0
     loss_avg = AverageMeter()
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()
-    for epoch in range(args.num_train_epochs):
+    for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         if args.train_text_encoder:
             text_encoder.train()
         for step, batch in enumerate(train_dataloader):
+            # Skip steps until we reach the resumed step
+            if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+                continue
+
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 with torch.no_grad():
