@@ -1,4 +1,4 @@
-export LR=5e-6
+export LR=2e-6
 
 accelerate launch \
 --mixed_precision=bf16 \
@@ -24,8 +24,8 @@ scripts/train_dreambooth_depth.py \
 --lr_scheduler="constant" \
 --lr_warmup_steps=0 \
 --num_class_images=400 \
---max_train_steps=25000 \
---checkpointing_steps=5000 \
+--max_train_steps=30000 \
+--checkpointing_steps=6000 \
 --drop_incomplete_batches \
 --use_8bit_adam \
 --num_workers=1 \

@@ -505,7 +505,23 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
     else:
         return f"{organization}/{model_id}"
 
-def create_depth_images(paths, pretrained_model_name_or_path, accelerator, unet, text_encoder):
+def create_depth_images(paths, 
+    pretrained_model_name_or_path,
+    accelerator,
+    unet,
+    text_encoder):
+    """
+    Generate the depth images using the given components.
+    Returns the scale factor of the VAE.
+    If paths is None and only pretrained_model_name_or_path is given, directly return the scale factor of the pretrained VAE. 
+    """
+    if paths is None:
+        pipeline = DiffusionPipeline.from_pretrained(
+            pretrained_model_name_or_path,
+            revision=args.revision,
+        )
+        return 2 ** (len(pipeline.vae.config.block_out_channels) - 1)
+
     pipeline = DiffusionPipeline.from_pretrained(
             pretrained_model_name_or_path,
             unet=accelerator.unwrap_model(unet),
@@ -628,25 +644,92 @@ def main(args):
             use_fast=False,
         )
 
+    # Get the scale factor only
+    vae_scale_factor = create_depth_images(
+        None,
+        args.pretrained_model_name_or_path, 
+        None, None, None)
+
+    train_dataset = DreamBoothDepthDataset(
+        instance_data_root=args.instance_data_dir,
+        instance_prompt=args.instance_prompt,
+        tokenizer=tokenizer,
+        vae_scale_factor=vae_scale_factor,
+        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
+        class_prompt=args.class_prompt,
+        size=args.resolution,
+        instance_prompt_shuffle_prob=args.instance_prompt_shuffle_prob,
+        instance_prompt_sep_token=args.instance_prompt_sep_token,
+        center_crop=args.center_crop,
+    )
+
+    collater = Collater(args.with_prior_preservation)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=args.train_batch_size,
+        shuffle=True,
+        collate_fn=collater,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        prefetch_factor=args.prefetch_factor,
+        drop_last=args.drop_incomplete_batches,
+    )
+
+    # Scheduler and math around the number of training steps.
+    overrode_max_train_steps = False
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if args.max_train_steps is None:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        overrode_max_train_steps = True
+
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint != "latest":
+            model_path = args.resume_from_checkpoint
+        else:
+            # Get the most recent checkpoint
+            dirs = os.listdir(args.output_dir)
+            dirs = [d for d in dirs if re.search('^[0-9]*$', d) is not None]
+            dirs = sorted(dirs, key=lambda x: int(x))
+            model_path = os.path.join(args.output_dir, dirs[-1])
+        accelerator.print(f"Resuming from checkpoint {model_path}")
+        global_step = int(os.path.basename(model_path))
+        resume_global_step = global_step
+        first_epoch = resume_global_step // num_update_steps_per_epoch
+        resume_step = resume_global_step % num_update_steps_per_epoch
+    else:
+        model_path = args.pretrained_model_name_or_path
+        global_step = 0
+        first_epoch = 0
+        resume_step = 0
+
     # import correct text encoder class
     text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
     # Load models and create wrapper for stable diffusion
+    noise_scheduler = PNDMScheduler.from_pretrained(
+        model_path,
+        subfolder="scheduler")
     text_encoder = text_encoder_cls.from_pretrained(
-        args.pretrained_model_name_or_path,
+        model_path,
         subfolder="text_encoder",
         revision=args.revision,
     )
     vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
+        model_path,
         subfolder="vae",
         revision=args.revision,
     )
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path,
+        model_path,
         subfolder="unet",
         revision=args.revision,
     )
+
+    create_depth_images(
+        [args.instance_data_dir, args.class_data_dir],
+        args.pretrained_model_name_or_path, 
+        accelerator, unet, text_encoder)
+
     
     if is_xformers_available():
         try:
@@ -694,41 +777,6 @@ def main(args):
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
-
-    noise_scheduler = PNDMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-
-    vae_scale_factor = create_depth_images([args.instance_data_dir, args.class_data_dir], args.pretrained_model_name_or_path, accelerator, unet, text_encoder)
-    train_dataset = DreamBoothDepthDataset(
-        instance_data_root=args.instance_data_dir,
-        instance_prompt=args.instance_prompt,
-        tokenizer=tokenizer,
-        vae_scale_factor=vae_scale_factor,
-        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
-        class_prompt=args.class_prompt,
-        size=args.resolution,
-        instance_prompt_shuffle_prob=args.instance_prompt_shuffle_prob,
-        instance_prompt_sep_token=args.instance_prompt_sep_token,
-        center_crop=args.center_crop,
-    )
-
-    collater = Collater(args.with_prior_preservation)
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=args.train_batch_size,
-        shuffle=True,
-        collate_fn=collater,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        prefetch_factor=args.prefetch_factor,
-        drop_last=args.drop_incomplete_batches,
-    )
-
-    # Scheduler and math around the number of training steps.
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -783,8 +831,6 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    global_step = 0
-    first_epoch = 0
 
     def save_weights(step: int):
         # Create the pipeline using using the trained modules and save it.
@@ -807,7 +853,7 @@ def main(args):
                 revision=args.revision,
             )
             pipeline.safety_checker = None
-            save_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
+            save_dir = os.path.join(args.output_dir, f"{step}")
             pipeline.save_pretrained(save_dir)
             with open(os.path.join(save_dir, "args.json"), "w") as f:
                 json.dump(args.__dict__, f, indent=2)
@@ -831,30 +877,14 @@ def main(args):
                             guidance_scale=args.save_guidance_scale,
                             num_inference_steps=args.save_infer_steps,
                             image=init_image,
-                            generator=g_cuda
+                            generator=g_cuda,
+                            strength=0.5
                         ).images
                         images[0].save(os.path.join(sample_dir, os.path.basename(fn)))
                 del pipeline
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             logger.info(f"Weights saved at {save_dir}")
-
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1]
-        accelerator.print(f"Resuming from checkpoint {path}")
-        accelerator.load_state(os.path.join(args.output_dir, path))
-        global_step = int(path.split("-")[1])
-
-        resume_global_step = global_step * args.gradient_accumulation_steps
-        first_epoch = resume_global_step // num_update_steps_per_epoch
-        resume_step = resume_global_step % num_update_steps_per_epoch
 
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
@@ -935,8 +965,7 @@ def main(args):
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
-                global_step += 1
-
+                # So we could sample right away and got a peek on the model
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
                         # offload the models to CPU to give space to sampling
@@ -945,6 +974,8 @@ def main(args):
                         save_weights(global_step)
                         # reload the models
                         vae = vae.to(accelerator.device)
+                global_step += 1
+
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

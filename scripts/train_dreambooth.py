@@ -557,7 +557,7 @@ def main(args):
             dirs = sorted(dirs, key=lambda x: int(x))
             model_path = os.path.join(args.output_dir, dirs[-1])
         accelerator.print(f"Resuming from checkpoint {model_path}")
-        global_step = int(os.path.basename(model_path)) + 1
+        global_step = int(os.path.basename(model_path))
         first_epoch = global_step // len(train_dataloader)
         resume_step = global_step % len(train_dataloader)
     else:
@@ -744,7 +744,8 @@ def main(args):
                             negative_prompt=args.save_sample_negative_prompt,
                             guidance_scale=args.save_guidance_scale,
                             num_inference_steps=args.save_infer_steps,
-                            generator=g_cuda
+                            generator=g_cuda,
+                            strength=0.5
                         ).images
                         images[0].save(os.path.join(sample_dir, f"{i}.png"))
                 del pipeline
@@ -753,9 +754,8 @@ def main(args):
             print(f"[*] Weights saved at {save_dir}")
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), 
+    progress_bar = tqdm(range(args.max_train_steps - global_step), 
         disable=not accelerator.is_local_main_process)
-    progress_bar.update(global_step)
     progress_bar.set_description("Steps")
     loss_avg = AverageMeter()
     text_enc_context = nullcontext() if args.train_text_encoder else torch.no_grad()

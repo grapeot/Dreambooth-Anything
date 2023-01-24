@@ -26,7 +26,7 @@ def predict(model: StableDiffusionDepth2ImgPipeline,
     init_image = init_image.resize((640, 360))
     images = model(prompt=prompt,
         image=init_image,
-        strength=0.4,
+        strength=0.5,
         guidance_scale=8,
         negative_prompt="disformed, extra limb, extra fingers",
         num_inference_steps=100).images
@@ -35,6 +35,7 @@ def predict(model: StableDiffusionDepth2ImgPipeline,
 def loadCheckpoint(ckptDir: str):
     model_id = "stabilityai/stable-diffusion-2-depth"
     pipeline = DiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+    print(pipeline.scheduler)
     state_dict = torch.load(join(ckptDir, 'pytorch_model.bin'))
     pipeline.unet.load_state_dict(state_dict)
     text_encoder_path = join(ckptDir, 'pytorch_model_1.bin') 
@@ -68,6 +69,7 @@ if __name__ == '__main__':
         model = StableDiffusionDepth2ImgPipeline.from_pretrained(
             args.model,
             torch_dtype=torch.float16).to(device)
+    print(model.scheduler)
     fns = glob(join(args.inputDir, '*.*'))
     fns = sorted(fns)
     startFrame = 0 if args.startFrame == -1 else args.startFrame
