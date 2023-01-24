@@ -7,8 +7,10 @@ import os
 import re
 import random
 import warnings
+import json
 from pathlib import Path
 from typing import Optional
+from glob import glob
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -17,7 +19,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DiffusionPipeline
+from diffusers import AutoencoderKL, DDPMScheduler, PNDMScheduler, StableDiffusionPipeline, UNet2DConditionModel, DiffusionPipeline, StableDiffusionDepth2ImgPipeline
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
@@ -25,7 +27,7 @@ from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import AutoTokenizer, PretrainedConfig, CLIPTextModel
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -266,6 +268,36 @@ def parse_args(input_args=None):
     parser.add_argument("--persistant_workers", action="store_true", help="Whether or not to use persistent workers.")
     parser.add_argument("--prefetch_factor", type=int, default=2, help="Number of batches to prefetch.")
     parser.add_argument("--drop_incomplete_batches", action="store_true", help="Whether or not to drop incomplete batches. (May help stabilize gradient)")
+    parser.add_argument(
+        "--save_sample_prompt",
+        type=str,
+        default=None,
+        help="The prompt used to generate sample outputs to save.",
+    )
+    parser.add_argument(
+        "--save_input_folder",
+        type=str,
+        default=None,
+        help="The folder stores the input images to the depth2img pipeline.",
+    )
+    parser.add_argument(
+        "--save_sample_negative_prompt",
+        type=str,
+        default=None,
+        help="The negative prompt used to generate sample outputs to save.",
+    )
+    parser.add_argument(
+        "--save_guidance_scale",
+        type=float,
+        default=7.5,
+        help="CFG for save sample.",
+    )
+    parser.add_argument(
+        "--save_infer_steps",
+        type=int,
+        default=50,
+        help="The number of inference steps for save sample.",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -318,8 +350,15 @@ class DreamBoothDepthDataset(Dataset):
         self.vae_scale_factor = vae_scale_factor
 
         self.instance_data_root = Path(instance_data_root)
+        # The dictionary that holds the instance prompt. The priority would be command line prompt > this dict > file name
+        self.instance_prompt_dict = None
         if not self.instance_data_root.exists():
             raise ValueError("Instance images root doesn't exists.")
+        tag_file = self.instance_data_root / 'tags.tsv'
+        if tag_file.exists():
+            # Read instances from the tags file
+            lines = [x.strip().split('\t') for x in tag_file.open()]
+            self.instance_prompt_dict = {x[0]: x[1] for x in lines}
 
         self.instance_images_path = list(filter(lambda path: str(path).find("_depth.") == -1, self.instance_data_root.iterdir()))
         self.num_instance_images = len(self.instance_images_path)
@@ -362,8 +401,11 @@ class DreamBoothDepthDataset(Dataset):
         instance_image_path = self.instance_images_path[index % self.num_instance_images]
         if self.instance_prompt in ["", None]:
             # if not using a static prompt use the image name as prompt
-            instance_prompt = re.sub(r'\..*$', '', instance_image_path.name)
-            instance_prompt = re.sub(r'_\d+', '', instance_prompt) # remove the number at the end of the image name for duplicate images
+            if self.instance_prompt_dict is None:
+                instance_prompt = re.sub(r'\..*$', '', instance_image_path.name)
+                instance_prompt = re.sub(r'_\d+', '', instance_prompt) # remove the number at the end of the image name for duplicate images
+            else:
+                instance_prompt = self.instance_prompt_dict[os.path.basename(instance_image_path.name)]
             if random.random() < self.instance_prompt_shuffle_prob:
                 # shuffle the prompt after splitting by the separator token if the probability condition is met
                 instance_prompt = self.instance_prompt_sep_token.join(random.sample(instance_prompt.split(self.instance_prompt_sep_token), len(instance_prompt.split(self.instance_prompt_sep_token))))
@@ -653,7 +695,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = PNDMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     vae_scale_factor = create_depth_images([args.instance_data_dir, args.class_data_dir], args.pretrained_model_name_or_path, accelerator, unet, text_encoder)
     train_dataset = DreamBoothDepthDataset(
@@ -743,6 +785,59 @@ def main(args):
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     global_step = 0
     first_epoch = 0
+
+    def save_weights(step: int):
+        # Create the pipeline using using the trained modules and save it.
+        if accelerator.is_main_process:
+            if args.train_text_encoder:
+                text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=True)
+            else:
+                text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+            pipeline = StableDiffusionDepth2ImgPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
+                text_encoder=text_enc_model,
+                vae=AutoencoderKL.from_pretrained(
+                    args.pretrained_model_name_or_path,
+                    subfolder="vae",
+                    revision=args.revision,
+                ),
+                scheduler=noise_scheduler,
+                torch_dtype=torch.float16,
+                revision=args.revision,
+            )
+            pipeline.safety_checker = None
+            save_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
+            pipeline.save_pretrained(save_dir)
+            with open(os.path.join(save_dir, "args.json"), "w") as f:
+                json.dump(args.__dict__, f, indent=2)
+
+            if args.save_sample_prompt is not None and args.save_input_folder is not None:
+                fns = glob(args.save_input_folder + '/*.*')
+                pipeline = pipeline.to(accelerator.device)
+                g_cuda = torch.Generator(device=accelerator.device)
+                if args.seed is not None:
+                    g_cuda.manual_seed(args.seed)
+                pipeline.set_progress_bar_config(disable=True)
+                sample_dir = os.path.join(save_dir, "samples")
+                os.makedirs(sample_dir, exist_ok=True)
+                with torch.autocast("cuda"), torch.inference_mode():
+                    for fn in tqdm(fns, desc='sampling'):
+                        init_image = Image.open(fn).convert("RGB")
+                        init_image = init_image.resize((512, 288))
+                        images = pipeline(
+                            args.save_sample_prompt,
+                            negative_prompt=args.save_sample_negative_prompt,
+                            guidance_scale=args.save_guidance_scale,
+                            num_inference_steps=args.save_infer_steps,
+                            image=init_image,
+                            generator=g_cuda
+                        ).images
+                        images[0].save(os.path.join(sample_dir, os.path.basename(fn)))
+                del pipeline
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            logger.info(f"Weights saved at {save_dir}")
 
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
@@ -844,9 +939,12 @@ def main(args):
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
+                        # offload the models to CPU to give space to sampling
+                        vae = vae.to('cpu')
+                        torch.cuda.empty_cache()
+                        save_weights(global_step)
+                        # reload the models
+                        vae = vae.to(accelerator.device)
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -859,16 +957,7 @@ def main(args):
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
-        # Copy the depth estimator from the pretrained pipeline, so it's self contained
-        original_pipeline = DiffusionPipeline.from_pretrained(args.pretrained_model_name_or_path)
-        pipeline = DiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-            revision=args.revision,
-            depth_estimator=original_pipeline.depth_estimator,
-        )
-        pipeline.save_pretrained(args.output_dir)
+        save_weights(global_step)
 
         if args.push_to_hub:
             repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
