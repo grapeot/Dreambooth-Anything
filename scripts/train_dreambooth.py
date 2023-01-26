@@ -745,7 +745,6 @@ def main(args):
                             guidance_scale=args.save_guidance_scale,
                             num_inference_steps=args.save_infer_steps,
                             generator=g_cuda,
-                            strength=0.5
                         ).images
                         images[0].save(os.path.join(sample_dir, f"{i}.png"))
                 del pipeline

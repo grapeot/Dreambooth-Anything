@@ -1,4 +1,4 @@
-export LR=2e-6
+export LR=8e-7
 
 accelerate launch \
 --mixed_precision=bf16 \
@@ -18,14 +18,14 @@ scripts/train_dreambooth_depth.py \
 --output_dir=data/models/sd21_dpeth_Lycoris500_class_scheduler_${LR} \
 --resolution=512 \
 --instance_prompt_shuffle_prob=0.0 \
---train_batch_size=1 \
+--train_batch_size=2 \
 --gradient_accumulation_steps=4 \
 --learning_rate=$LR \
 --lr_scheduler="constant" \
 --lr_warmup_steps=0 \
 --num_class_images=400 \
 --max_train_steps=30000 \
---checkpointing_steps=6000 \
+--checkpointing_steps=3000 \
 --drop_incomplete_batches \
 --use_8bit_adam \
 --num_workers=1 \
@@ -33,5 +33,6 @@ scripts/train_dreambooth_depth.py \
 --persistant_workers \
 --prefetch_factor 2 \
 --save_sample_prompt='an anime in LYCORISANIME style' \
---save_input_folder=data/NichijouVideo/frames
-# --resume_from_checkpoint=latest
+--save_input_folder=data/NichijouVideo/frames \
+--resume_from_checkpoint=latest \
+--save_infer_steps=400

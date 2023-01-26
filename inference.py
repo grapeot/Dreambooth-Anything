@@ -15,7 +15,8 @@ def predict(model: StableDiffusionDepth2ImgPipeline,
     outfn: str,
     prompt: str,
     generator: torch.Generator = None,
-    seed: int = 0):
+    seed: int = 0,
+    steps: int = 50):
     """
     Use the model to make one prediction
     """
@@ -23,19 +24,22 @@ def predict(model: StableDiffusionDepth2ImgPipeline,
     if generator is not None:
         generator.manual_seed(seed)
     init_image = Image.open(imgfn).convert("RGB")
-    init_image = init_image.resize((640, 360))
+    init_image = init_image.resize((910, 512))
     images = model(prompt=prompt,
+        generator=generator,
         image=init_image,
-        strength=0.5,
+        strength=0.4,
         guidance_scale=8,
         negative_prompt="disformed, extra limb, extra fingers",
-        num_inference_steps=100).images
+        num_inference_steps=steps).images
     images[0].save(outfn)
 
 def loadCheckpoint(ckptDir: str):
+    """
+    Deprectaed. In the new version of the scripts, the serialized model could be directlty loaded with pieplines.
+    """
     model_id = "stabilityai/stable-diffusion-2-depth"
     pipeline = DiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
-    print(pipeline.scheduler)
     state_dict = torch.load(join(ckptDir, 'pytorch_model.bin'))
     pipeline.unet.load_state_dict(state_dict)
     text_encoder_path = join(ckptDir, 'pytorch_model_1.bin') 
@@ -54,6 +58,7 @@ if __name__ == '__main__':
     parser.add_argument('--outputDir', help='Path to the output dir to store the generated frames', required=True)
     parser.add_argument('--prompt', help='Prompt used to generate the image', required=True)
     parser.add_argument('--seed', help='Seed to used generate each frame. The default value -1 will randomly generate one, and use it for all the frames. -2 will try out 50 seeds for seed tuning.', type=int, default=-1)
+    parser.add_argument('--steps', help='Inferance steps during latent diffusion process.', type=int, default=50)
     args = parser.parse_args()
     
     if args.checkpoint is not None and args.model is not None:
@@ -69,7 +74,6 @@ if __name__ == '__main__':
         model = StableDiffusionDepth2ImgPipeline.from_pretrained(
             args.model,
             torch_dtype=torch.float16).to(device)
-    print(model.scheduler)
     fns = glob(join(args.inputDir, '*.*'))
     fns = sorted(fns)
     startFrame = 0 if args.startFrame == -1 else args.startFrame
@@ -84,10 +88,10 @@ if __name__ == '__main__':
 
     generator = torch.Generator(device=device)
     for fn in tqdm(fns[startFrame: endFrame]):
+        newfn = join(args.outputDir, f'{basename(fn)}_{seed}_{args.steps}.jpg')
         if seed == -2:
             for seed in range(100):
-                newfn = join(args.outputDir, f'{basename(fn)}_{seed}.jpg')
-                predict(model, fn, newfn, args.prompt, generator, seed)
+                newfn = join(args.outputDir, f'{basename(fn)}_{seed}_{args.steps}.jpg')
+                predict(model, fn, newfn, args.prompt, generator, seed, args.steps)
         else:
-            newfn = join(args.outputDir, basename(fn))
-            predict(model, fn, newfn, args.prompt, generator, seed)
+            predict(model, fn, newfn, args.prompt, generator, seed, args.steps)
