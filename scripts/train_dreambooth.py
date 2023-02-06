@@ -25,6 +25,8 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
+from glob import glob
+import wandb
 
 
 torch.backends.cudnn.benchmark = True
@@ -690,7 +692,7 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers("dreambooth")
+        accelerator.init_trackers("dreambooth", config={k: v for k, v in args.__dict__.items() if k != 'concepts_list'})
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -737,10 +739,11 @@ def main(args):
                 pipeline.set_progress_bar_config(disable=True)
                 sample_dir = os.path.join(save_dir, "samples")
                 os.makedirs(sample_dir, exist_ok=True)
+                prompts = args.save_sample_prompt.split('|')
                 with torch.autocast("cuda"), torch.inference_mode():
                     for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
                         images = pipeline(
-                            args.save_sample_prompt,
+                            prompts[i % len(prompts)],
                             negative_prompt=args.save_sample_negative_prompt,
                             guidance_scale=args.save_guidance_scale,
                             num_inference_steps=args.save_infer_steps,
@@ -834,8 +837,26 @@ def main(args):
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
 
-            if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
+            if accelerator.is_main_process and \
+                global_step > 0 and \
+                not global_step % args.save_interval \
+                and global_step >= args.save_min_steps:
+                # offload the models to CPU to give space to sampling
+                vae = vae.to('cpu')
+                unet = unet.to('cpu')
+                torch.cuda.empty_cache()
                 save_weights(global_step)
+                # reload the models
+                vae = vae.to(accelerator.device)
+                unet = unet.to(accelerator.device)
+                torch.cuda.empty_cache()
+
+                # sample_dir = os.path.join(args.output_dir, f"{step}", 'samples')
+                # sample_filenames = glob(sample_dir + '/*.png')
+                # for fn in sample_filenames:
+                #     accelerator.get_tracker("wandb").log(
+                #         {'sample': wandb.Image(fn)}, step=global_step
+                #     )
 
             progress_bar.update(1)
             global_step += 1
@@ -851,5 +872,6 @@ def main(args):
 
 
 if __name__ == "__main__":
+    torch.autograd.set_detect_anomaly(True)
     args = parse_args()
     main(args)

@@ -29,7 +29,7 @@ def predict(model: StableDiffusionDepth2ImgPipeline,
         generator=generator,
         image=init_image,
         strength=0.4,
-        guidance_scale=8,
+        guidance_scale=15,
         negative_prompt="disformed, extra limb, extra fingers",
         num_inference_steps=steps).images
     images[0].save(outfn)
@@ -88,7 +88,11 @@ if __name__ == '__main__':
 
     generator = torch.Generator(device=device)
     for fn in tqdm(fns[startFrame: endFrame]):
-        newfn = join(args.outputDir, f'{basename(fn)}_{seed}_{args.steps}.jpg')
+        newfn = join(args.outputDir, basename(fn))
+        print(newfn, exists(newfn))
+        if exists(newfn):
+            continue
+        # newfn = join(args.outputDir, f'{basename(fn)}_{seed}_{args.steps}.jpg')
         if seed == -2:
             for seed in range(100):
                 newfn = join(args.outputDir, f'{basename(fn)}_{seed}_{args.steps}.jpg')

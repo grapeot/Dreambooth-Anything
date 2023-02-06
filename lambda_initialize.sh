@@ -2,7 +2,7 @@
 sudo apt-get update
 sudo apt-get install -y -q vim zsh git wget dos2unix python3 python3-pip parallel tig build-essential curl htop rsync tmux zip unzip pkg-config software-properties-common
 sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt install python3.10-dev python3.10-distutils
+sudo apt install -y python3.10-dev python3.10-distutils
 curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 wget --no-check-certificate https://github.com/robbyrussell/oh-my-zsh/raw/master/tools/install.sh -O - | sh
 pushd ~
@@ -25,10 +25,11 @@ wget https://developer.download.nvidia.com/compute/cuda/11.6.0/local_installers/
 chmod +x cuda_11.6.0_510.39.01_linux.run
 sudo ./cuda_11.6.0_510.39.01_linux.run --toolkit --silent
 
-python specific
+# python specific
 cd ~
 virtualenv -p python3.10 py310
 source py310/bin/activate
+curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 echo 'source ~/py310/bin/activate' >> ~/.zshrc
 export PATH=$PATH:/usr/local/cuda/bin
 echo 'export PATH=$PATH:/usr/local/cuda/bin' >> ~/.zshrc

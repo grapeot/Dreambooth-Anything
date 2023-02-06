@@ -1,4 +1,4 @@
-export LR=8e-7
+export LR=2e-7
 
 accelerate launch \
 --mixed_precision=bf16 \
@@ -34,5 +34,5 @@ scripts/train_dreambooth_depth.py \
 --prefetch_factor 2 \
 --save_sample_prompt='an anime in LYCORISANIME style' \
 --save_input_folder=data/NichijouVideo/frames \
---resume_from_checkpoint=latest \
 --save_infer_steps=400
+# --resume_from_checkpoint=latest \
