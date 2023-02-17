@@ -27,7 +27,10 @@ def clean_model(path: str):
     # find the latest
     checkpoint_numbers = sorted([int(d) for d in checkpoint_dirs if re.match(r'^\d*$', d) is not None and d != '0'])
     for num in checkpoint_numbers[:-1]:
+        # if num % 5000 != 0:
         clean_one_checkpoint(join(path, str(num)))
 
 if __name__ == '__main__':
-    clean_model('data/models/anythingv4_touhou100k_noclass_1e-7')
+    # clean_model('data/models/anythingv4_touhou100k_noclass_5e-8')
+    clean_model('data/models/SDv2_UglySweater_2e-8_linear_warmup')
+    # clean_model('data/models/sd21_dpeth_Lycoris500_5e-8_scheduler')

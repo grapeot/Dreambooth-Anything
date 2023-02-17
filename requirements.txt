@@ -5,4 +5,4 @@ git+https://github.com/huggingface/transformers
 ftfy
 tensorboard
 modelcards
-diffusers
+git+https://github.com/ShivamShrirao/diffusers

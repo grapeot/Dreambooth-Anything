@@ -18,6 +18,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from diffusers.utils.import_utils import is_xformers_available
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from huggingface_hub import HfFolder, Repository, whoami
@@ -26,7 +27,7 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 from glob import glob
-import wandb
+# import wandb
 
 
 torch.backends.cudnn.benchmark = True
@@ -589,6 +590,12 @@ def main(args):
     if not args.train_text_encoder:
         text_encoder.requires_grad_(False)
 
+    if is_xformers_available():
+        vae.enable_xformers_memory_efficient_attention()
+        unet.enable_xformers_memory_efficient_attention()
+    else:
+        logger.warning("xformers is not available. Make sure it is installed correctly")
+
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
         if args.train_text_encoder:
@@ -755,6 +762,8 @@ def main(args):
                     torch.cuda.empty_cache()
             print(f"[*] Weights saved at {save_dir}")
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps - global_step), 
         disable=not accelerator.is_local_main_process)
