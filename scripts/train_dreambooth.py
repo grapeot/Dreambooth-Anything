@@ -719,17 +719,13 @@ def main(args):
             if args.train_text_encoder:
                 text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=True)
             else:
-                text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+                text_enc_model = text_encoder
             scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
                 text_encoder=text_enc_model,
-                vae=AutoencoderKL.from_pretrained(
-                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
-                    subfolder=None if args.pretrained_vae_name_or_path else "vae",
-                    revision=None if args.pretrained_vae_name_or_path else args.revision,
-                ),
+                vae=accelerator.unwrap_model(vae),
                 safety_checker=None,
                 scheduler=scheduler,
                 torch_dtype=torch.float16,
@@ -850,15 +846,7 @@ def main(args):
                 global_step > 0 and \
                 not global_step % args.save_interval \
                 and global_step >= args.save_min_steps:
-                # offload the models to CPU to give space to sampling
-                vae = vae.to('cpu')
-                unet = unet.to('cpu')
-                torch.cuda.empty_cache()
                 save_weights(global_step)
-                # reload the models
-                vae = vae.to(accelerator.device)
-                unet = unet.to(accelerator.device)
-                torch.cuda.empty_cache()
 
                 # sample_dir = os.path.join(args.output_dir, f"{step}", 'samples')
                 # sample_filenames = glob(sample_dir + '/*.png')
