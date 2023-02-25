@@ -769,9 +769,6 @@ def main(args):
                         images[0].save(os.path.join(sample_dir, f"{i}.png"))
                 del pipeline
 
-            if not args.not_cache_latents:
-                del vae
-                del text_enc_model
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             print(f"[*] Weights saved at {save_dir}")
