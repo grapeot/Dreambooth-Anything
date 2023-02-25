@@ -31,6 +31,6 @@ def clean_model(path: str):
         clean_one_checkpoint(join(path, str(num)))
 
 if __name__ == '__main__':
-    # clean_model('data/models/anythingv4_touhou100k_noclass_5e-8')
-    clean_model('data/models/SDv2_UglySweater_2e-8_linear_warmup')
+    clean_model('data/models/anythingv4_touhou100k_noclass_5e-8_linear')
+    clean_model('data/models/anythingv4_Lycoris1000_1e-8_linear_class')
     # clean_model('data/models/sd21_dpeth_Lycoris500_5e-8_scheduler')

@@ -718,14 +718,28 @@ def main(args):
         if accelerator.is_main_process:
             if args.train_text_encoder:
                 text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=True)
+                vae_model = accelerator.unwrap_model(vae),
             else:
-                text_enc_model = text_encoder
+                if not args.not_cache_latents:
+                    text_enc_model = CLIPTextModel.from_pretrained(
+                        model_path,
+                        subfolder="text_encoder",
+                        revision=args.revision,
+                    )
+                    vae_model = AutoencoderKL.from_pretrained(
+                        model_path,
+                        subfolder="vae",
+                        revision=args.revision,
+                    )
+                else:
+                    text_enc_model = text_encoder
+                    vae_model = accelerator.unwrap_model(vae),
             scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False)
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
                 text_encoder=text_enc_model,
-                vae=accelerator.unwrap_model(vae),
+                vae=vae_model,
                 safety_checker=None,
                 scheduler=scheduler,
                 torch_dtype=torch.float16,
@@ -754,8 +768,12 @@ def main(args):
                         ).images
                         images[0].save(os.path.join(sample_dir, f"{i}.png"))
                 del pipeline
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+
+            if not args.not_cache_latents:
+                del vae
+                del text_enc_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             print(f"[*] Weights saved at {save_dir}")
 
     if torch.cuda.is_available():
